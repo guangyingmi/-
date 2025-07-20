@@ -29,4 +29,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-exe
-          path: dist/reorder_invoices_win.exe
+          path: dist/**/*.exe        # ← 递归 dist 内全部 .exe
