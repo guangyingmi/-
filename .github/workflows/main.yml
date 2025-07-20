@@ -23,7 +23,7 @@ jobs:
 
       - name: Build single‑file EXE
         run: |
-          pyinstaller --onefile reorder_invoices.py --name reorder_invoices_win
+          pyinstaller --onefile reorder_invoices.py --name 财务报表处理程序_win
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
