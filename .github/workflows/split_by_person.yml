@@ -35,5 +35,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Excel按人拆分-windows
+          name: split-by-person-windows
           path: dist/**
