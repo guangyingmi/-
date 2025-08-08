@@ -25,7 +25,7 @@ jobs:
           if (Test-Path requirements.txt) {
             pip install -r requirements.txt
           } else {
-            pip install pandas openpyxl pyinstaller
+            pip install pandas openpyxl pyinstaller tqdm
           }
 
       - name: Build with PyInstaller
