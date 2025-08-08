@@ -1,153 +1,215 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Excel 汇总表「按人拆分」工具
----------------------------------
-用途：
-    将一个汇总 Excel（含所有人的记录）按“姓名/销售员”等列拆分为多个 Excel 文件，
-    每个人一个文件，文件名即为该人姓名。自动将“xxx 汇总”行一并归入对应人员文件。
+Excel 汇总表「按人拆分」（保留样式，无序号前缀）
+---------------------------------------------
+- 保留样式：表头背景色、单元格边框/字体/对齐、列宽、行高、冻结窗格、自动筛选
+- 自动识别姓名列（销售员/姓名/员工/人员/负责人/Name），也可用参数指定
+- 自动将“某某 汇总”行并入对应人员文件
 
-使用方法：
-    方式一：双击同目录下的 EXE（由本脚本打包生成），自动扫描当前目录的 xlsx 文件并拆分。
-    方式二：命令行运行：
-        python split_by_person.py -i "汇总.xlsx" -c 销售员
-
-参数：
-    -i, --input       输入 Excel 文件路径（默认自动扫描当前目录 *.xlsx 的第一个）
-    -s, --sheet       工作表名或索引（默认 0，即第一张）
-    -c, --name-col    姓名列名（默认自动从列名中匹配：销售员/姓名/员工/人员/负责人/Name）
-    -o, --out-dir     输出目录（默认：按人拆分_YYYYMMDD_HHMMSS）
-    --keep-empty      保留姓名为空的行（默认不保留）
-
-依赖：pandas、openpyxl
-打包：pyinstaller --onefile --name Excel按人拆分 split_by_person.py
-
-作者：ChatGPT 生成
-版本：1.0.0
+依赖：openpyxl>=3.1
+打包示例（PyInstaller）：
+    pyinstaller --onefile --name "Excel按人拆分" split_by_person_styles.py
 """
 import argparse
-import sys
 import os
 import re
+import sys
+from collections import OrderedDict
+from copy import copy
 import datetime as _dt
-from typing import Optional, List, Union
-import pandas as pd
+from typing import Optional, List, Dict
+
+from openpyxl import load_workbook, Workbook
+from openpyxl.utils import get_column_letter
 
 DEFAULT_NAME_KEYS = ["销售员","姓名","员工","人员","负责人","Name","name"]
+
 
 def log(msg: str):
     ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
+
 def find_default_excel() -> Optional[str]:
-    # 选择当前目录下第一个正常的 xlsx
     for name in os.listdir("."):
         if name.lower().endswith(".xlsx") and not name.startswith("~$"):
-            # 排除可能的结果输出文件
             if "按人拆分" in name:
                 continue
             return name
     return None
 
+
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Excel 汇总表按人拆分工具")
+    p = argparse.ArgumentParser(description="Excel 汇总表按人拆分（保留样式）")
     p.add_argument("-i","--input", help="输入 Excel 路径（默认自动扫描）")
-    p.add_argument("-s","--sheet", help="工作表名或索引（默认 0）", default="0")
-    p.add_argument("-c","--name-col", help="姓名列名（默认自动匹配）")
+    p.add_argument("-s","--sheet", help="表名（精确匹配）或索引（0 基）", default=None)
+    p.add_argument("-c","--name-col", help="姓名列名（默认自动识别）")
     p.add_argument("-o","--out-dir", help="输出目录")
-    p.add_argument("--keep-empty", action="store_true", help="保留姓名为空的行")
+    p.add_argument("--keep-empty", action="store_true", help="保留姓名为空的行（默认不保留）")
     return p.parse_args()
 
-def load_excel(path: str, sheet: str) -> pd.DataFrame:
-    # sheet 可以是名称或字符串数字索引
-    try:
-        if sheet.isdigit():
-            df = pd.read_excel(path, sheet_name=int(sheet))
-        else:
-            df = pd.read_excel(path, sheet_name=sheet)
-    except Exception:
-        # 回退：默认第一张
-        df = pd.read_excel(path)
-    # 统一清理列名
-    df.columns = [str(c).strip() for c in df.columns]
-    return df
 
-def detect_name_col(columns: List[str], manual: Optional[str]=None) -> str:
-    if manual and manual in columns:
+def detect_sheet(wb, sheet):
+    if sheet is None:
+        return wb.worksheets[0]
+    if isinstance(sheet, str):
+        if sheet.isdigit():
+            idx = int(sheet)
+            return wb.worksheets[idx]
+        if sheet in wb.sheetnames:
+            return wb[sheet]
+    if isinstance(sheet, int):
+        return wb.worksheets[sheet]
+    return wb.worksheets[0]
+
+
+def detect_name_col(header_cells: List[str], manual: Optional[str]=None) -> str:
+    if manual and manual in header_cells:
         return manual
-    # 优先完整匹配
     for key in DEFAULT_NAME_KEYS:
-        if key in columns:
+        if key in header_cells:
             return key
-    # 次选包含匹配
-    for c in columns:
+    for c in header_cells:
         if any(key in c for key in DEFAULT_NAME_KEYS):
             return c
-    # 否则用第一列兜底
-    return columns[0]
+    return header_cells[0]
 
-def base_name(s: Union[str, float, int]) -> str:
-    if not isinstance(s, str):
+
+def base_name(s) -> str:
+    if s is None:
         return ""
-    s = s.strip()
-    s = re.sub(r"\s*汇总$", "", s)  # 去掉末尾的“汇总”
+    s = str(s).strip()
+    s = re.sub(r"\s*汇总$", "", s)  # 去掉“ 汇总”后缀
     return s.strip()
 
+
 def sanitize_filename(name: str) -> str:
-    # Windows 不允许的字符替换为下划线
     return re.sub(r'[\\/:*?"<>|]', "_", name)
 
-def split_by_person(df: pd.DataFrame, name_col: str, keep_empty: bool=False) -> int:
-    df["_base_name"] = df[name_col].apply(base_name)
-    if not keep_empty:
-        df = df[df["_base_name"].astype(bool)]
-    # 保持原有顺序的 groupby：使用 groupby(sort=False)
-    count = 0
-    for person, sub in df.groupby("_base_name", sort=False):
-        out = sub.drop(columns=["_base_name"])
-        fname = sanitize_filename(person) or "未命名"
-        yield fname, out
-        count += 1
-    return count
 
-def main():
-    args = parse_args()
-    in_path = args.input or find_default_excel()
+def copy_cell(src, dst):
+    """复制单元格的值与样式（字体、对齐、边框、填充、数字格式、保护）。"""
+    dst.value = src.value
+    if src.has_style:
+        dst.font = copy(src.font)              # 字体
+        dst.border = copy(src.border)          # 边框
+        dst.fill = copy(src.fill)              # 背景填充
+        dst.number_format = src.number_format  # 数字格式
+        dst.protection = copy(src.protection)  # 保护
+        dst.alignment = copy(src.alignment)    # 对齐方式（水平/垂直/换行等）
+
+
+def copy_header_and_dimensions(src_ws, dst_ws, header_row=1):
+    """复制列宽、表头样式、行高、冻结窗格。"""
+    # 列宽
+    for col_letter, dim in src_ws.column_dimensions.items():
+        nd = dst_ws.column_dimensions[col_letter]
+        nd.width = dim.width
+        nd.hidden = dim.hidden
+        nd.bestFit = dim.bestFit
+
+    # 表头（源表 header_row -> 目标第 1 行）
+    for col in range(1, src_ws.max_column + 1):
+        sc = src_ws.cell(row=header_row, column=col)
+        dc = dst_ws.cell(row=1, column=col)
+        copy_cell(sc, dc)
+
+    # 行高
+    try:
+        dst_ws.row_dimensions[1].height = src_ws.row_dimensions[header_row].height
+    except Exception:
+        pass
+
+    # 冻结窗格（例如 A2）
+    dst_ws.freeze_panes = src_ws.freeze_panes
+
+
+def write_row_from_src(src_ws, dst_ws, src_row_idx, dst_row_idx):
+    """按列复制一整行（值+样式）。"""
+    for col in range(1, src_ws.max_column + 1):
+        sc = src_ws.cell(row=src_row_idx, column=col)
+        dc = dst_ws.cell(row=dst_row_idx, column=col)
+        copy_cell(sc, dc)
+
+
+def run(input_path: Optional[str], sheet_sel, name_col_manual: Optional[str],
+        out_dir: Optional[str], keep_empty: bool):
+    in_path = input_path or find_default_excel()
     if not in_path or not os.path.exists(in_path):
-        log("未找到输入 Excel。请将 EXE 与汇总表放在同一目录，或通过 -i 指定文件。")
+        log("未找到输入 Excel。请将 EXE 与汇总表放同一目录，或用 -i 指定路径。")
         sys.exit(2)
 
     log(f"输入文件：{in_path}")
-    df = load_excel(in_path, args.sheet)
-    if df.empty:
-        log("工作表为空。程序结束。")
-        sys.exit(0)
+    # data_only=True：读取公式显示值；样式依然可用
+    wb = load_workbook(in_path, data_only=True)
+    ws = detect_sheet(wb, sheet_sel)
+    log(f"工作表：{ws.title}")
 
-    name_col = detect_name_col(df.columns.tolist(), args.name_col)
-    if name_col not in df.columns:
-        log(f"未找到姓名列：{name_col}")
+    # 表头（第 1 行）
+    header = [str(c.value).strip() if c.value is not None else "" for c in next(ws.iter_rows(min_row=1, max_row=1))]
+    if not header or all(not h for h in header):
+        log("无法读取表头（第 1 行为空）。")
         sys.exit(3)
-    log(f"使用姓名列：{name_col}")
 
-    out_dir = args.out_dir or f"按人拆分_{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    name_col = detect_name_col(header, name_col_manual)
+    try:
+        name_col_idx = header.index(name_col) + 1  # 1-based
+    except ValueError:
+        log(f"未找到姓名列：{name_col}")
+        sys.exit(4)
+    log(f"使用姓名列：{name_col}（第 {name_col_idx} 列）")
+
+    out_dir = out_dir or f"按人拆分_{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     os.makedirs(out_dir, exist_ok=True)
     log(f"输出目录：{out_dir}")
 
+    # 人员 -> （workbook, worksheet），保持插入顺序（即首次出现顺序）
+    books: Dict[str, Dict] = OrderedDict()
+    header_row_idx = 1
+
+    # 遍历数据行（从第 2 行开始）
+    for r in range(2, ws.max_row + 1):
+        person_raw = ws.cell(row=r, column=name_col_idx).value
+        person = base_name(person_raw)
+        if not person and not keep_empty:
+            continue
+
+        if person not in books:
+            new_wb = Workbook()
+            new_ws = new_wb.active
+            new_ws.title = person or "未命名"
+            copy_header_and_dimensions(ws, new_ws, header_row=header_row_idx)
+            books[person] = {"wb": new_wb, "ws": new_ws}
+
+        dst_ws = books[person]["ws"]
+        dst_next_row = dst_ws.max_row + 1
+        write_row_from_src(ws, dst_ws, r, dst_next_row)
+
+    # 设置筛选范围并保存
     total = 0
-    from pandas import ExcelWriter
-    for fname, sub in split_by_person(df, name_col, args.keep_empty):
-        path = os.path.join(out_dir, f"{fname}.xlsx")
-        with pd.ExcelWriter(path, engine="openpyxl") as writer:
-            sub.to_excel(writer, index=False)
+    for person, info in books.items():
+        wb2, ws2 = info["wb"], info["ws"]
+        last_col_letter = get_column_letter(ws2.max_column)
+        ws2.auto_filter.ref = f"A1:{last_col_letter}{ws2.max_row}"
+
+        safe = sanitize_filename(person) or "未命名"
+        out_path = os.path.join(out_dir, f"{safe}.xlsx")
+        wb2.save(out_path)
         total += 1
-        log(f"已生成：{path}（{len(sub)} 行）")
+        log(f"已生成：{out_path}（{ws2.max_row-1} 条记录）")
 
     log(f"完成！共生成 {total} 个文件。")
 
-if __name__ == "__main__":
+
+def main():
+    args = parse_args()
     try:
-        main()
+        run(args.input, args.sheet, args.name_col, args.out_dir, args.keep_empty)
     except Exception as e:
         log(f"发生错误：{e}")
         raise
+
+
+if __name__ == "__main__":
+    main()
