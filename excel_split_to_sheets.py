@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-按人名把汇总表拆成“一个Excel，多个以人名命名的Sheet”（保留样式，带进度条）
----------------------------------------------------------------------------
+按人名把汇总表拆成“一个Excel，多个以人名命名的Sheet”（保留样式，带进度条，原子化保存）
+------------------------------------------------------------------------------------------
 - 读取汇总Excel，按“销售员/姓名”等列分组
 - 在一个新工作簿里，为每个人创建一个Sheet（Sheet名=人名，自动处理非法字符/重名/超长）
 - 每个Sheet保留：表头样式、列宽、行高、边框、字体、对齐、冻结窗格、自动筛选
-- 不做任何验证/报告
+- 采用“原子化保存 + 回读自检”，避免因杀软/占用/中断导致生成的 xlsx 损坏
 
 依赖：openpyxl>=3.1, tqdm>=4.60
 用法示例：
@@ -17,6 +17,7 @@ import argparse
 import os
 import re
 import sys
+import tempfile
 import datetime as _dt
 from collections import OrderedDict
 from copy import copy
@@ -27,7 +28,7 @@ from openpyxl.utils import get_column_letter
 from tqdm import tqdm
 
 # 自动识别姓名列的候选关键词
-DEFAULT_NAME_KEYS = ["销售员","姓名","员工","人员","负责人","Name","name"]
+DEFAULT_NAME_KEYS = ["销售员", "姓名", "员工", "人员", "负责人", "Name", "name"]
 
 
 # ----------------- 通用工具 -----------------
@@ -59,7 +60,7 @@ def detect_sheet(wb, sheet):
     return wb.worksheets[0]
 
 
-def detect_name_col(header_cells: List[str], manual: Optional[str]=None) -> str:
+def detect_name_col(header_cells: List[str], manual: Optional[str] = None) -> str:
     if manual and manual in header_cells:
         return manual
     for key in DEFAULT_NAME_KEYS:
@@ -95,7 +96,7 @@ def make_sheet_title(person: str, existing: set) -> str:
     while title in existing:
         suffix = f"_{i}"
         max_base_len = 31 - len(suffix)
-        title = (base[:max_base_len] if max_base_len > 0 else base[:31-len(suffix)]) + suffix
+        title = (base[:max_base_len] if max_base_len > 0 else base[:31 - len(suffix)]) + suffix
         i += 1
     return title
 
@@ -144,6 +145,32 @@ def write_row_from_src(src_ws, dst_ws, src_row_idx, dst_row_idx):
         sc = src_ws.cell(row=src_row_idx, column=col)
         dc = dst_ws.cell(row=dst_row_idx, column=col)
         copy_cell(sc, dc)
+
+
+# ----------------- 原子化保存 + 回读自检 -----------------
+def safe_save_xlsx(workbook: Workbook, out_path: str):
+    """
+    先保存到同目录临时文件 -> 用 openpyxl 回读自检 -> 原子替换目标文件。
+    避免因杀软拦截/云盘占用/意外中断留下损坏文件。
+    """
+    from openpyxl import load_workbook as _load
+
+    folder = os.path.dirname(os.path.abspath(out_path)) or "."
+    os.makedirs(folder, exist_ok=True)
+
+    fd, tmp = tempfile.mkstemp(prefix="._tmp_xlsx_", suffix=".xlsx", dir=folder)
+    os.close(fd)
+    try:
+        workbook.save(tmp)                      # 写临时文件
+        _ = _load(tmp, read_only=True, data_only=True)  # 自检
+        _.close()
+        os.replace(tmp, out_path)               # 原子替换
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
 
 
 # ----------------- 主逻辑：一个Excel多Sheet -----------------
@@ -213,18 +240,18 @@ def split_to_sheets(in_path: str, sheet_sel, name_col_manual: Optional[str],
         last_col_letter = get_column_letter(ws.max_column)
         ws.auto_filter.ref = f"A1:{last_col_letter}{ws.max_row}"
 
-    # 保存
-    out_wb.save(out_file)
+    # 保存（原子替换 + 自检）
+    safe_save_xlsx(out_wb, out_file)
     log(f"完成！共写入 {len(books)} 个人员Sheet -> {out_file}")
 
 
 # ----------------- CLI -----------------
 def main():
-    ap = argparse.ArgumentParser(description="按人名把汇总表拆成一个Excel（多Sheet，保留样式）")
-    ap.add_argument("-i","--input", help="输入 Excel 路径（默认自动扫描）")
-    ap.add_argument("-s","--sheet", help="表名或索引（0基）", default=None)
-    ap.add_argument("-c","--name-col", help="姓名列名（默认自动识别）")
-    ap.add_argument("-o","--out-file", help="输出Excel文件路径（默认：按人分Sheet_时间戳.xlsx）")
+    ap = argparse.ArgumentParser(description="按人名把汇总表拆成一个Excel（多Sheet，保留样式，原子化保存）")
+    ap.add_argument("-i", "--input", help="输入 Excel 路径（默认自动扫描）")
+    ap.add_argument("-s", "--sheet", help="表名或索引（0基）", default=None)
+    ap.add_argument("-c", "--name-col", help="姓名列名（默认自动识别）")
+    ap.add_argument("-o", "--out-file", help="输出Excel文件路径（默认：按人分Sheet_时间戳.xlsx）")
     ap.add_argument("--keep-empty", action="store_true", help="保留姓名为空的行（默认不保留）")
     args = ap.parse_args()
 
