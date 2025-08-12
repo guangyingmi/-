@@ -1,0 +1,41 @@
+name: Build single EXE (onefile)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) {
+            pip install -r requirements.txt
+          } else {
+            pip install openpyxl tqdm pyinstaller
+          }
+
+      # Debug阶段建议保留控制台，便于看到日志；稳定后可改为 --noconsole
+      - name: Build (onefile, no upx)
+        run: |
+          pyinstaller --onefile --name "excel_split_to_sheets" --noupx --clean --collect-all openpyxl excel_split_to_sheets.py
+          dir dist
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: excel-split-to-sheets-onefile
+          path: dist/excel_split_to_sheets.exe
+          if-no-files-found: error
