@@ -1,31 +1,17 @@
-name: Build EXE (Excel split to sheets)
+name: Build (onedir) and package
 
 on:
   push:
     branches: [ main, master ]
-  pull_request:
   workflow_dispatch:
 
 jobs:
   build-windows:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
 
       - name: Install deps
         run: |
@@ -36,13 +22,20 @@ jobs:
             pip install openpyxl tqdm pyinstaller
           }
 
-      - name: Build with PyInstaller
+      - name: Build (onedir, no upx)
         run: |
-          pyinstaller --onefile --name "excel_split_to_sheets" excel_split_to_sheets.py
+          pyinstaller --onedir --name "excel_split_to_sheets" --noupx --clean excel_split_to_sheets.py
 
-      - name: Upload artifact (EXE)
+      - name: Zip artifact
+        shell: pwsh
+        run: |
+          $zip = "excel-split-to-sheets-win.zip"
+          Compress-Archive -Path "dist/excel_split_to_sheets/*" -DestinationPath $zip -Force
+          Write-Host "Zipped to $zip"
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: excel-split-to-sheets-windows
-          path: dist/excel_split_to_sheets.exe
-          if-no-files-found: warn
+          path: |
+            excel-split-to-sheets-win.zip
